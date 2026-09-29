@@ -1,0 +1,5 @@
+fastapi
+uvicorn[standard]
+paho-mqtt>=2.0
+python-dotenv
+psycopg[binary,pool]>=3.2

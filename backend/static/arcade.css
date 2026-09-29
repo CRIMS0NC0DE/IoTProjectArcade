@@ -1,0 +1,3 @@
+/* Linhas de varredura de monitor CRT */
+body { background-image: repeating-linear-gradient(0deg, rgba(255, 255, 255, .03) 0 1px, transparent 1px 3px); }
+.glow { text-shadow: 0 0 10px rgba(250, 204, 21, .6); }

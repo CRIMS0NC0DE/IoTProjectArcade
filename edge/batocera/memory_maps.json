@@ -1,0 +1,104 @@
+{
+  "1bc674be034e43c96b86487ac69d9293": {
+    "name": "Sonic The Hedgehog (Mega Drive, USA/Europa)",
+    "verified": true,
+    "score": {
+      "address": "0xfe26",
+      "size": 4,
+      "format": "be_swapped",
+      "multiplier": 10,
+      "max": 9999990
+    },
+    "stage": {
+      "address": "0xfe11",
+      "size": 1,
+      "map": {
+        "0": 1,
+        "2": 2,
+        "4": 3,
+        "1": 4,
+        "3": 5,
+        "5": 6
+      }
+    },
+    "active": {
+      "address": "0xf601",
+      "size": 1,
+      "in": [
+        12,
+        16
+      ],
+      "note": "modo de jogo: 0x0C fase, 0x10 estágio especial (0x08 = demo)"
+    }
+  },
+  "9feeb724052c39982d432a7851c98d3e": {
+    "name": "Sonic The Hedgehog 2 (Mega Drive, Rev A)",
+    "verified": true,
+    "score": {
+      "address": "0xfe26",
+      "size": 4,
+      "format": "be_swapped",
+      "multiplier": 10,
+      "max": 9999990
+    },
+    "stage": {
+      "address": "0xfe11",
+      "size": 1,
+      "map": {
+        "0": 1,
+        "13": 2,
+        "15": 3,
+        "12": 4,
+        "7": 5,
+        "11": 6,
+        "10": 7,
+        "4": 8,
+        "5": 8,
+        "16": 9,
+        "6": 10,
+        "14": 11
+      }
+    },
+    "active": {
+      "address": "0xf601",
+      "size": 1,
+      "in": [
+        12,
+        16
+      ],
+      "note": "modo de jogo: 0x0C fase, 0x10 estágio especial (0x08 = demo)"
+    }
+  },
+  "cdd3c8c37322978ca8669b34bc89c804": {
+    "name": "Super Mario World (SNES, EUA)",
+    "verified": true,
+    "score": {
+      "address": "0x0f34",
+      "size": 3,
+      "format": "le",
+      "multiplier": 10,
+      "max": 9999990
+    },
+    "stage": {
+      "address": "0x1f2e",
+      "size": 1
+    },
+    "active": {
+      "address": "0x0100",
+      "size": 1,
+      "in": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20
+      ],
+      "note": "modo de jogo: 0x0B-0x14 mapa e fases (0x07 = título com demo)"
+    }
+  }
+}

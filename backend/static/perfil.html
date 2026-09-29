@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Perfil · Arcade Cloud Score</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/arcade.css">
+  <script src="/arcade.js"></script>
+</head>
+<body class="min-h-screen bg-slate-950 text-slate-200 font-mono">
+  <main class="max-w-3xl mx-auto px-4 py-10">
+    <nav class="mb-6 flex justify-between text-xs tracking-widest">
+      <a class="text-slate-400 hover:text-yellow-300" href="/">◀ RANKING</a>
+      <button id="logout" class="text-slate-400 hover:text-red-400">SAIR</button>
+    </nav>
+
+    <p id="loading" class="py-16 text-center text-slate-500">Carregando…</p>
+
+    <div id="content" class="hidden">
+      <header class="text-center">
+        <p id="tag" class="glow text-5xl sm:text-6xl font-bold tracking-[0.3em] text-yellow-400"></p>
+        <p id="username" class="mt-2 text-slate-300"></p>
+        <p id="since" class="mt-1 text-xs tracking-widest text-slate-500"></p>
+      </header>
+
+      <section class="mt-8 grid grid-cols-3 gap-3 text-center">
+        <div class="rounded-lg border border-slate-800 bg-slate-900/60 px-2 py-4">
+          <p id="stat-plays" class="text-2xl font-bold text-slate-100"></p>
+          <p class="mt-1 text-[10px] sm:text-xs tracking-widest text-slate-500">PARTIDAS</p>
+        </div>
+        <div class="rounded-lg border border-slate-800 bg-slate-900/60 px-2 py-4">
+          <p id="stat-games" class="text-2xl font-bold text-slate-100"></p>
+          <p class="mt-1 text-[10px] sm:text-xs tracking-widest text-slate-500">JOGOS</p>
+        </div>
+        <div class="rounded-lg border border-slate-800 bg-slate-900/60 px-2 py-4">
+          <p id="stat-time" class="text-2xl font-bold text-slate-100"></p>
+          <p class="mt-1 text-[10px] sm:text-xs tracking-widest text-slate-500">TEMPO JOGADO</p>
+        </div>
+      </section>
+
+      <div class="mt-10 mb-3 flex items-baseline justify-between">
+        <h2 class="text-sm tracking-widest text-yellow-400/80">CONQUISTAS</h2>
+        <p id="ach-summary" class="text-xs tracking-widest text-slate-500"></p>
+      </div>
+      <div id="achievements" class="space-y-3"></div>
+
+      <h2 class="mt-10 mb-3 text-sm tracking-widest text-yellow-400/80">RECORDES</h2>
+      <div class="overflow-x-auto rounded-lg border border-slate-800">
+        <table class="w-full text-left text-sm sm:text-base">
+          <thead class="bg-slate-900 text-xs tracking-widest text-yellow-400/80">
+            <tr>
+              <th class="px-3 py-3">JOGO</th>
+              <th class="px-3 py-3 text-right">PARTIDAS</th>
+              <th class="px-3 py-3 text-right">MELHOR</th>
+              <th class="px-3 py-3 text-right">POSIÇÃO</th>
+            </tr>
+          </thead>
+          <tbody id="records" class="divide-y divide-slate-800"></tbody>
+        </table>
+      </div>
+
+      <h2 class="mt-10 mb-3 text-sm tracking-widest text-yellow-400/80">ÚLTIMAS PARTIDAS</h2>
+      <div class="overflow-x-auto rounded-lg border border-slate-800">
+        <table class="w-full text-left text-sm sm:text-base">
+          <thead class="bg-slate-900 text-xs tracking-widest text-yellow-400/80">
+            <tr>
+              <th class="px-3 py-3">JOGO</th>
+              <th class="px-3 py-3">QUANDO</th>
+              <th class="px-3 py-3 text-right">DURAÇÃO</th>
+              <th class="px-3 py-3 text-right">SCORE</th>
+            </tr>
+          </thead>
+          <tbody id="recent" class="divide-y divide-slate-800"></tbody>
+        </table>
+      </div>
+
+      <h2 class="mt-10 mb-1 text-sm tracking-widest text-yellow-400/80">SAVES NA NUVEM</h2>
+      <p class="mb-3 text-xs text-slate-500">Seu progresso volta sozinho quando você entra no arcade, em qualquer aparelho.</p>
+      <div class="overflow-x-auto rounded-lg border border-slate-800">
+        <table class="w-full text-left text-sm sm:text-base">
+          <thead class="bg-slate-900 text-xs tracking-widest text-yellow-400/80">
+            <tr>
+              <th class="px-3 py-3">JOGO</th>
+              <th class="px-3 py-3">TIPO</th>
+              <th class="px-3 py-3">ATUALIZADO</th>
+              <th class="px-3 py-3 text-right">ARQUIVO</th>
+            </tr>
+          </thead>
+          <tbody id="saves" class="divide-y divide-slate-800"></tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const MEDIA = "https://media.retroachievements.org";
+    const EMPTY = (cols, text) => `<tr><td colspan="${cols}" class="px-3 py-8 text-center text-slate-500">${text}</td></tr>`;
+
+    function render(p) {
+      $("tag").textContent = p.player_tag;
+      $("username").textContent = p.username;
+      $("since").textContent = "JOGADOR DESDE " + new Date(p.created_at * 1000).toLocaleDateString("pt-BR");
+      $("stat-plays").textContent = fmtScore(p.plays);
+      $("stat-games").textContent = fmtScore(p.games);
+      $("stat-time").textContent = p.seconds_played ? fmtDuration(p.seconds_played) : "0min";
+
+      $("records").innerHTML = p.records.length ? p.records.map((r) => `
+        <tr class="hover:bg-slate-900/60">
+          <td class="px-3 py-2 max-w-[12rem] truncate" title="${esc(r.game)}">${esc(r.game)}</td>
+          <td class="px-3 py-2 text-right">${fmtScore(r.plays)}</td>
+          <td class="px-3 py-2 text-right tabular-nums">${r.best == null ? "—" : fmtScore(r.best)}</td>
+          <td class="px-3 py-2 text-right ${r.position === 1 ? "text-yellow-400 font-bold" : ""}">${r.position == null ? "—" : "#" + Number(r.position)}</td>
+        </tr>`).join("") : EMPTY(4, "Nenhum jogo ainda. Bora jogar!");
+
+      $("recent").innerHTML = p.recent.length ? p.recent.map((r) => `
+        <tr class="hover:bg-slate-900/60">
+          <td class="px-3 py-2 max-w-[12rem] truncate" title="${esc(r.game)}">${esc(r.game)}</td>
+          <td class="px-3 py-2 whitespace-nowrap text-slate-400">${fmtDate(r.started_at)}</td>
+          <td class="px-3 py-2 text-right">${fmtDuration(r.seconds)}</td>
+          <td class="px-3 py-2 text-right tabular-nums">${r.score == null ? "—" : fmtScore(r.score)}</td>
+        </tr>`).join("") : EMPTY(4, "Nenhuma partida registrada ainda");
+
+      $("loading").classList.add("hidden");
+      $("content").classList.remove("hidden");
+    }
+
+    function badge(a, size) {
+      const cls = `${size} shrink-0 rounded border ${a.unlocked_at ? "border-yellow-400" : "border-slate-700 opacity-40 grayscale"}`;
+      if (!a.badge) return `<span class="${cls} flex items-center justify-center bg-slate-900">🏆</span>`;
+      return `<img class="${cls}" loading="lazy" alt="" src="${MEDIA}/Badge/${esc(a.badge)}.png">`;
+    }
+
+    function achievementLine(a) {
+      const when = a.unlocked_at ? `desbloqueada em ${fmtDate(a.unlocked_at)}` : "bloqueada";
+      const rarity = a.rarity == null ? "" : ` · ${Number(a.rarity)}% dos jogadores do arcade`;
+      return `
+        <li class="flex gap-3 py-2 ${a.unlocked_at ? "" : "text-slate-500"}">
+          ${badge(a, "h-12 w-12")}
+          <div class="min-w-0">
+            <p class="font-bold ${a.unlocked_at ? "text-slate-100" : ""}">${esc(a.title)}
+              ${a.points ? `<span class="ml-1 text-xs font-normal text-yellow-400/80">${Number(a.points)} pts</span>` : ""}</p>
+            <p class="text-sm">${esc(a.description)}</p>
+            <p class="mt-1 text-xs text-slate-500">${when}${rarity}</p>
+          </div>
+        </li>`;
+    }
+
+    function renderAchievements(games) {
+      const unlocked = games.reduce((n, g) => n + g.unlocked, 0);
+      const points = games.reduce((n, g) => n + g.points_unlocked, 0);
+      $("ach-summary").textContent = unlocked ? `🏆 ${fmtScore(unlocked)} · ${fmtScore(points)} PTS` : "";
+      if (!games.length) {
+        $("achievements").innerHTML = `<p class="rounded-lg border border-slate-800 px-3 py-8 text-center text-slate-500">
+          Nenhuma conquista ainda. Jogue logado no arcade um jogo com conquistas do RetroAchievements.</p>`;
+        return;
+      }
+      $("achievements").innerHTML = games.map((g) => {
+        const pct = g.total ? Math.round((100 * g.unlocked) / g.total) : 0;
+        // Primeiro as desbloqueadas; a faixa mostra até 12 ícones.
+        const ordered = [...g.achievements].sort((a, b) => (b.unlocked_at ? 1 : 0) - (a.unlocked_at ? 1 : 0));
+        return `
+        <details class="group rounded-lg border border-slate-800 bg-slate-900/60">
+          <summary class="flex cursor-pointer list-none flex-col gap-3 p-3">
+            <div class="flex items-center gap-3">
+              ${g.icon ? `<img class="h-10 w-10 rounded" loading="lazy" alt="" src="${MEDIA}${esc(g.icon)}">` : ""}
+              <div class="min-w-0 flex-1">
+                <p class="truncate font-bold text-slate-100">${esc(g.game)}</p>
+                <div class="mt-1 h-2 overflow-hidden rounded bg-slate-800">
+                  <div class="h-full bg-yellow-400" style="width: ${pct}%"></div>
+                </div>
+              </div>
+              <p class="shrink-0 text-right text-sm">
+                <span class="text-yellow-400">${g.unlocked}/${g.total}</span>
+                <span class="block text-xs text-slate-500">${g.points_unlocked}/${g.points_total} pts</span>
+              </p>
+            </div>
+            <div class="flex flex-wrap gap-1">${ordered.slice(0, 12).map((a) => badge(a, "h-8 w-8")).join("")}
+              ${g.total > 12 ? `<span class="self-center text-xs text-slate-500">+${g.total - 12}</span>` : ""}</div>
+            <p class="text-xs text-slate-500 group-open:hidden">▼ ver todas</p>
+          </summary>
+          <ul class="divide-y divide-slate-800 border-t border-slate-800 px-3">${ordered.map(achievementLine).join("")}</ul>
+        </details>`;
+      }).join("");
+    }
+
+    // Nome do arquivo no Batocera: "<ROM>.srm", "<ROM>.state", "<ROM>.state3", "<ROM>.state.auto"...
+    const SAVE_KINDS = [
+      [/\.state\.auto$/i, () => "save state automático"],
+      [/\.state(\d+)$/i, (m) => `save state ${m[1]}`],
+      [/\.state$/i, () => "save state"],
+      [/\.srm$/i, () => "save do jogo"],
+    ];
+
+    function describeSave(filename) {
+      for (const [re, label] of SAVE_KINDS) {
+        const m = filename.match(re);
+        if (m) return { game: filename.slice(0, m.index), kind: label(m) };
+      }
+      const dot = filename.lastIndexOf(".");
+      return { game: dot > 0 ? filename.slice(0, dot) : filename, kind: filename.slice(dot + 1) };
+    }
+
+    const fmtBytes = (n) => (n < 1024 ? `${n} B` : `${(n / 1024).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} KB`);
+
+    function renderSaves(saves) {
+      const rows = saves.filter((s) => !/\.png$/i.test(s.filename));  // miniaturas dos save states
+      $("saves").innerHTML = rows.length ? rows.map((s) => {
+        const d = describeSave(s.filename);
+        return `
+        <tr class="hover:bg-slate-900/60">
+          <td class="px-3 py-2 max-w-[12rem] truncate" title="${esc(d.game)}">${esc(d.game)}</td>
+          <td class="px-3 py-2 whitespace-nowrap text-slate-400">${esc(d.kind)}</td>
+          <td class="px-3 py-2 whitespace-nowrap text-slate-400">${fmtDate(s.modified_at)}</td>
+          <td class="px-3 py-2 text-right whitespace-nowrap">
+            <a class="text-yellow-400 hover:text-yellow-300" href="/api/me/saves/${Number(s.id)}" download>⬇ ${fmtBytes(Number(s.size))}</a>
+          </td>
+        </tr>`;
+      }).join("") : EMPTY(4, "Nenhum save ainda. Eles aparecem aqui depois que você joga logado no arcade.");
+    }
+
+    $("logout").addEventListener("click", async () => {
+      await api("/api/auth/logout", { method: "POST" }).catch(() => {});
+      location.href = "/";
+    });
+
+    Promise.all([api("/api/me/profile"), api("/api/me/achievements"), api("/api/me/saves")]).then(([profile, achievements, saves]) => {
+      render(profile);
+      renderAchievements(achievements);
+      renderSaves(saves);
+    }).catch((err) => {
+      if (err.status === 401) location.href = "/login.html";
+      else $("loading").textContent = err.message;
+    });
+  </script>
+</body>
+</html>

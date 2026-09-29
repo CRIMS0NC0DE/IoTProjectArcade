@@ -1,0 +1,22 @@
+#!/bin/bash
+# Serviço do Batocera: mantém o daemon do Arcade Cloud Score rodando desde o boot.
+# Ativado com `batocera-services enable arcade_score` (o install.sh faz isso).
+PIDFILE=/var/run/arcade_score.pid
+
+running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
+
+case "$1" in
+    start)
+        running && exit 0
+        cd /userdata/system/arcade || exit 1
+        nohup python3 arcaded.py >/dev/null 2>&1 &
+        echo $! > "$PIDFILE"
+        ;;
+    stop)
+        running && kill "$(cat "$PIDFILE")"
+        rm -f "$PIDFILE"
+        ;;
+    status)
+        running && echo "running" || echo "stopped"
+        ;;
+esac

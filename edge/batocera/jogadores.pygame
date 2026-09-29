@@ -1,0 +1,411 @@
+"""Tela de login do arcade (sistema PYGAME do Batocera): entrar com usuário e senha, criar conta ou jogar como
+convidado. Funciona com teclado (digitação direta) ou controle (teclado virtual na tela).
+
+A senha nunca sai do Pi: o servidor manda um desafio (salt da conta + nonce de uso único) e o Pi responde com
+HMAC(scrypt(senha), nonce). No cadastro, o próprio Pi gera o hash scrypt. Os pedidos vão pela fila local e pelo
+daemon (MQTT); a resposta volta em state/auth_result.json.
+"""
+
+import hashlib
+import hmac
+import re
+import secrets
+import sys
+import time
+import uuid
+
+sys.path.insert(0, "/userdata/system/arcade")
+import pygame  # noqa: E402
+from pygame._sdl2 import controller  # noqa: E402
+
+from common import AUTH_PENDING, AUTH_RESULT, SESSION, enqueue, load_config, read_json, write_json  # noqa: E402
+
+BG, PANEL, BORDER = (2, 6, 23), (15, 23, 42), (51, 65, 85)
+YELLOW, TEXT, MUTED, GREEN, RED = (250, 204, 21), (226, 232, 240), (100, 116, 139), (74, 222, 128), (248, 113, 113)
+FONT = "/usr/share/fonts/dejavu/DejaVuSansMono.ttf"
+FONT_BOLD = "/usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf"
+
+SCRYPT = {"n": 2**15, "r": 8, "p": 3}  # os mesmos do servidor (backend/auth.py)
+SCRYPT_MAXMEM = 64 * 1024 * 1024
+RESPONSE_TIMEOUT = 10  # segundos esperando o servidor em cada etapa
+DEVICE = load_config()["DEVICE_ID"]
+
+# Teclado virtual para quem joga de controle.
+KEY_ROWS = ["1234567890", "qwertyuiop", "asdfghjkl@", "zxcvbnm._-", "!#$%&*+=?/"]
+KEY_ACTIONS = ["MAIÚSC", "APAGAR", "ESPAÇO", "OK"]
+
+
+class Field:
+    def __init__(self, label: str, max_len: int, secret: bool = False, allowed: str | None = None, case=None):
+        self.label, self.max_len, self.secret, self.value = label, max_len, secret, ""
+        self.allowed = re.compile(allowed) if allowed else None  # caracteres aceitos (o resto é ignorado)
+        self.case = case  # str.lower / str.upper: usuário minúsculo, tag maiúscula
+
+    def type(self, text: str) -> None:
+        for ch in self.case(text) if self.case else text:
+            if (not self.allowed or self.allowed.fullmatch(ch)) and ch.isprintable() and len(self.value) < self.max_len:
+                self.value += ch
+
+    def shown(self) -> str:
+        return "•" * len(self.value) if self.secret else self.value
+
+
+class Button:
+    def __init__(self, label: str, action):
+        self.label, self.action = label, action
+
+
+class LoginScreen:
+    def __init__(self):
+        pygame.init()
+        controller.init()
+        self.surface = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+        pygame.mouse.set_visible(False)
+        pygame.key.start_text_input()
+        pygame.key.set_repeat(400, 40)  # segurar Apagar ou as setas repete
+        self.w, self.h = self.surface.get_size()
+        self.title_font = pygame.font.Font(FONT_BOLD, self.h // 14)
+        self.item_font = pygame.font.Font(FONT, self.h // 26)
+        self.small_font = pygame.font.Font(FONT, self.h // 40)
+        self.clock = pygame.time.Clock()
+        self.controllers, self.joysticks = {}, {}
+        self.stick_centered = True
+        self.using_controller = False
+        self.keyboard_open = False
+        self.key_row = self.key_col = 0
+        self.key_shift = False
+        self.message = ("", MUTED)
+        self.done = False
+        self.show_login()
+
+    # ---------- telas ----------
+
+    def show_login(self, keep_user: str = "") -> None:
+        self.mode = "ENTRAR"
+        self.user = Field("USUÁRIO", 20, allowed=r"[a-z0-9_]", case=str.lower)
+        self.user.value = keep_user
+        self.password = Field("SENHA", 128, secret=True)
+        self.items = [self.user, self.password, Button("ENTRAR", self.login), Button("CRIAR CONTA", self.show_register),
+                      Button("JOGAR COMO CONVIDADO", self.guest), Button("VOLTAR", self.quit)]
+        self.focus = 1 if keep_user else 0
+
+    def show_register(self) -> None:
+        self.mode = "CRIAR CONTA"
+        self.new_user = Field("USUÁRIO (3 a 20: letras, números ou _)", 20, allowed=r"[a-z0-9_]", case=str.lower)
+        self.new_tag = Field("TAG DO PLACAR (1 a 3 letras ou números)", 3, allowed=r"[A-Z0-9]", case=str.upper)
+        self.new_password = Field("SENHA (pelo menos 8 caracteres)", 128, secret=True)
+        self.new_confirm = Field("CONFIRMAR SENHA", 128, secret=True)
+        self.items = [self.new_user, self.new_tag, self.new_password, self.new_confirm,
+                      Button("CRIAR CONTA", self.register), Button("VOLTAR", lambda: self.show_login())]
+        self.focus = 0
+        self.message = ("", MUTED)
+
+    # ---------- desenho ----------
+
+    def text(self, font, content, color, center_x, y) -> None:
+        image = font.render(content, True, color)
+        self.surface.blit(image, image.get_rect(midtop=(center_x, y)))
+
+    def draw(self, busy: str = "") -> None:
+        s, cx = self.surface, self.w // 2
+        s.fill(BG)
+        top = self.h // 22
+        self.text(self.small_font, "A R C A D E   C L O U D   S C O R E", YELLOW, cx, top)
+        top += self.small_font.get_height() + 8
+        self.text(self.title_font, self.mode, YELLOW, cx, top)
+        top += self.title_font.get_height() + 6
+        who = (read_json(SESSION) or {}).get("player_tag") or "convidado"
+        self.text(self.small_font, f"Jogando agora: {who}", MUTED, cx, top)
+
+        panel_w = min(int(self.w * 0.62), 900)
+        x, y = cx - panel_w // 2, self.h // 4
+        box_h = self.item_font.get_height() + 18
+        caret = int(time.monotonic() * 2) % 2 == 0
+        for i, item in enumerate(self.items):
+            focused = i == self.focus and not busy
+            if isinstance(item, Field):
+                label = self.small_font.render(item.label, True, YELLOW if focused else MUTED)
+                s.blit(label, (x, y))
+                y += label.get_height() + 4
+                rect = pygame.Rect(x, y, panel_w, box_h)
+                pygame.draw.rect(s, PANEL, rect, border_radius=8)
+                pygame.draw.rect(s, YELLOW if focused else BORDER, rect, width=3 if focused else 2, border_radius=8)
+                value = item.shown() + ("_" if focused and caret else "")
+                s.blit(self.item_font.render(value, True, TEXT), (x + 14, y + 9))
+                y += box_h + 14
+            else:
+                rect = pygame.Rect(x, y, panel_w, box_h)
+                if focused:
+                    pygame.draw.rect(s, YELLOW, rect, border_radius=8)
+                else:
+                    pygame.draw.rect(s, BORDER, rect, width=2, border_radius=8)
+                self.text(self.item_font, item.label, BG if focused else TEXT, cx, y + 9)
+                y += box_h + 10
+
+        message, color = (busy, TEXT) if busy else self.message
+        if message:
+            dots = "." * (1 + int(time.monotonic() * 3) % 3) if busy else ""
+            self.text(self.small_font, message + dots, color, cx, y + 6)
+        if self.keyboard_open and not busy:
+            self.draw_keyboard()
+        else:
+            hint = ("↑↓ escolher  ·  A digitar ou confirmar  ·  B voltar  ·  START entrar" if self.using_controller
+                    else "↑↓ ou Tab escolher  ·  Enter confirmar  ·  Esc voltar")
+            self.text(self.small_font, hint, MUTED, cx, self.h - self.h // 14)
+        pygame.display.flip()
+
+    def draw_keyboard(self) -> None:
+        rows = [list(r.upper() if self.key_shift else r) for r in KEY_ROWS] + [KEY_ACTIONS]
+        key_w = min(self.w // 14, 90)
+        key_h = int(self.item_font.get_height() * 1.6)
+        top = self.h - (len(rows) * (key_h + 8)) - self.h // 12
+        # O teclado cobre o formulário: o campo sendo editado aparece logo acima das teclas.
+        field = self.items[self.focus]
+        box_h, label_h = self.item_font.get_height() + 18, self.small_font.get_height()
+        panel_top = top - box_h - label_h - 36
+        pygame.draw.rect(self.surface, PANEL, (0, panel_top - 30, self.w, self.h - panel_top + 30))  # sem rótulo cortado
+        panel_w = min(int(self.w * 0.62), 900)
+        x = self.w // 2 - panel_w // 2
+        self.surface.blit(self.small_font.render(field.label, True, YELLOW), (x, panel_top + 10))
+        rect = pygame.Rect(x, panel_top + 14 + label_h, panel_w, box_h)
+        pygame.draw.rect(self.surface, BG, rect, border_radius=8)
+        pygame.draw.rect(self.surface, YELLOW, rect, width=3, border_radius=8)
+        caret = "_" if int(time.monotonic() * 2) % 2 == 0 else ""
+        self.surface.blit(self.item_font.render(field.shown() + caret, True, TEXT), (x + 14, rect.y + 9))
+        for r, row in enumerate(rows):
+            width = key_w if r < len(KEY_ROWS) else key_w * 10 // len(row)  # a última linha tem 4 teclas largas
+            left = self.w // 2 - (width * len(row) + 8 * (len(row) - 1)) // 2
+            for c, key in enumerate(row):
+                rect = pygame.Rect(left + c * (width + 8), top + r * (key_h + 8), width, key_h)
+                chosen = (r, c) == (self.key_row, self.key_col)
+                caps_on = key == "MAIÚSC" and self.key_shift
+                pygame.draw.rect(self.surface, YELLOW if chosen else (MUTED if caps_on else BORDER), rect, border_radius=6)
+                font = self.item_font if len(key) == 1 else self.small_font
+                image = font.render(key, True, BG if chosen else TEXT)
+                self.surface.blit(image, image.get_rect(center=rect.center))
+        hint = "direcional escolher  ·  A tecla  ·  B apagar  ·  START ou OK fechar"
+        self.text(self.small_font, hint, MUTED, self.w // 2, self.h - self.h // 16)
+
+    # ---------- entrada ----------
+
+    def events(self):
+        """Traduz teclado, controles reconhecidos e joysticks genéricos em ações da tela."""
+        for event in pygame.event.get():
+            if event.type == pygame.JOYDEVICEADDED:
+                joystick = pygame.joystick.Joystick(event.device_index)
+                if controller.is_controller(event.device_index):
+                    self.controllers[joystick.get_instance_id()] = controller.Controller(event.device_index)
+                else:
+                    self.joysticks[joystick.get_instance_id()] = joystick
+            elif event.type == pygame.QUIT:
+                yield "quit", None
+            elif event.type == pygame.TEXTINPUT:
+                self.using_controller = False
+                yield "text", event.text
+            elif event.type == pygame.KEYDOWN:
+                self.using_controller = False
+                shift_tab = event.key == pygame.K_TAB and event.mod & pygame.KMOD_SHIFT
+                action = {pygame.K_UP: "up", pygame.K_DOWN: "down", pygame.K_LEFT: "left", pygame.K_RIGHT: "right",
+                          pygame.K_TAB: "up" if shift_tab else "down", pygame.K_RETURN: "enter",
+                          pygame.K_KP_ENTER: "enter", pygame.K_BACKSPACE: "backspace", pygame.K_ESCAPE: "back"}.get(event.key)
+                if action:
+                    yield action, None
+            elif event.type == pygame.CONTROLLERBUTTONDOWN:
+                self.using_controller = True
+                action = {pygame.CONTROLLER_BUTTON_DPAD_UP: "up", pygame.CONTROLLER_BUTTON_DPAD_DOWN: "down",
+                          pygame.CONTROLLER_BUTTON_DPAD_LEFT: "left", pygame.CONTROLLER_BUTTON_DPAD_RIGHT: "right",
+                          pygame.CONTROLLER_BUTTON_A: "a", pygame.CONTROLLER_BUTTON_B: "b",
+                          pygame.CONTROLLER_BUTTON_START: "start", pygame.CONTROLLER_BUTTON_BACK: "back"}.get(event.button)
+                if action:
+                    yield action, None
+            elif event.type == pygame.CONTROLLERAXISMOTION and event.axis in (pygame.CONTROLLER_AXIS_LEFTX,
+                                                                              pygame.CONTROLLER_AXIS_LEFTY):
+                if action := self.stick(event.axis == pygame.CONTROLLER_AXIS_LEFTY, event.value / 32767):
+                    yield action, None
+            # Joysticks genéricos (sem mapeamento no SDL): botão 0 confirma, 1 volta, os outros entram.
+            elif event.type == pygame.JOYHATMOTION and event.instance_id in self.joysticks:
+                self.using_controller = True
+                action = {(0, 1): "up", (0, -1): "down", (-1, 0): "left", (1, 0): "right"}.get(tuple(event.value))
+                if action:
+                    yield action, None
+            elif event.type == pygame.JOYAXISMOTION and event.instance_id in self.joysticks and event.axis in (0, 1):
+                if action := self.stick(event.axis == 1, event.value):
+                    yield action, None
+            elif event.type == pygame.JOYBUTTONDOWN and event.instance_id in self.joysticks:
+                self.using_controller = True
+                yield {0: "a", 1: "b"}.get(event.button, "start"), None
+
+    def stick(self, vertical: bool, value: float):
+        # Analógico só conta ao sair do centro: segurar a alavanca não dispara sem parar.
+        if abs(value) < 0.3:
+            self.stick_centered = True
+        elif abs(value) > 0.6 and self.stick_centered:
+            self.stick_centered = False
+            self.using_controller = True
+            return ("up" if value < 0 else "down") if vertical else ("left" if value < 0 else "right")
+        return None
+
+    def handle(self, action: str, value) -> None:
+        if action == "quit":
+            self.quit()
+            return
+        if self.keyboard_open:
+            self.handle_keyboard(action, value)
+            return
+        item = self.items[self.focus]
+        if action in ("up", "down"):
+            self.focus = (self.focus + (1 if action == "down" else -1)) % len(self.items)
+        elif action == "text" and isinstance(item, Field):
+            item.type(value)
+        elif action == "backspace" and isinstance(item, Field):
+            item.value = item.value[:-1]
+        elif action == "enter":
+            if not isinstance(item, Field):
+                item.action()
+            elif isinstance(self.items[self.focus + 1], Field):
+                self.focus += 1  # próximo campo
+            else:
+                (self.login if self.mode == "ENTRAR" else self.register)()  # Enter no último campo já envia
+        elif action == "a":
+            if isinstance(item, Field):
+                self.keyboard_open, self.key_row, self.key_col = True, 1, 0
+            else:
+                item.action()
+        elif action == "start":
+            (self.login if self.mode == "ENTRAR" else self.register)()
+        elif action in ("b", "back"):
+            if self.mode == "ENTRAR":
+                self.quit()
+            else:
+                self.show_login()
+
+    def handle_keyboard(self, action: str, value) -> None:
+        field = self.items[self.focus]
+        rows = KEY_ROWS + [KEY_ACTIONS]
+        if action in ("up", "down"):
+            self.key_row = (self.key_row + (1 if action == "down" else -1)) % len(rows)
+            self.key_col = min(self.key_col, len(rows[self.key_row]) - 1)
+        elif action in ("left", "right"):
+            self.key_col = (self.key_col + (1 if action == "right" else -1)) % len(rows[self.key_row])
+        elif action == "text":
+            field.type(value)
+        elif action in ("backspace", "b"):
+            field.value = field.value[:-1]
+        elif action in ("start", "enter", "back"):
+            self.keyboard_open = False
+        elif action == "a":
+            key = rows[self.key_row][self.key_col]
+            if key == "MAIÚSC":
+                self.key_shift = not self.key_shift
+            elif key == "APAGAR":
+                field.value = field.value[:-1]
+            elif key == "ESPAÇO":
+                field.type(" ")
+            elif key == "OK":
+                self.keyboard_open = False
+            else:
+                field.type(key.upper() if self.key_shift else key)
+
+    # ---------- conversa com o servidor (via fila e daemon) ----------
+
+    def request(self, payload: dict, busy: str, request_id: str | None = None) -> dict | None:
+        """Envia um pedido de login/cadastro e espera a resposta do servidor (None se não vier a tempo)."""
+        request_id = request_id or uuid.uuid4().hex
+        write_json(AUTH_PENDING, {"request_id": request_id})
+        enqueue("login", {"request_id": request_id, "ts": int(time.time()), **payload})
+        end = time.monotonic() + RESPONSE_TIMEOUT
+        while time.monotonic() < end:
+            result = read_json(AUTH_RESULT) or {}
+            if result.get("request_id") == request_id:
+                return result
+            pygame.event.pump()
+            self.draw(busy)
+            self.clock.tick(15)
+        return None
+
+    def offline(self) -> None:
+        self.message = ("Sem resposta do servidor. Confira a internet do arcade ou jogue como convidado.", RED)
+
+    def login(self) -> None:
+        username, password = self.user.value, self.password.value
+        if not username or not password:
+            self.message = ("Preencha usuário e senha.", RED)
+            return
+        challenge = self.request({"action": "challenge", "username": username}, "Conectando")
+        if challenge is None:
+            return self.offline()
+        # Limites: um servidor falso não consegue travar o Pi pedindo um scrypt gigante.
+        if challenge.get("type") != "challenge" or challenge["n"] > 2**16 or challenge["r"] > 8 or challenge["p"] > 4:
+            self.message = ("Resposta inesperada do servidor.", RED)
+            return
+        self.draw("Conferindo a senha")
+        key = hashlib.scrypt(password.encode(), salt=bytes.fromhex(challenge["salt"]), n=challenge["n"],
+                             r=challenge["r"], p=challenge["p"], maxmem=SCRYPT_MAXMEM)
+        request_id = uuid.uuid4().hex  # a prova fica presa a este pedido e a este aparelho
+        proof = hmac.new(key, f"{challenge['nonce']}:{DEVICE}:{request_id}".encode(), hashlib.sha256).hexdigest()
+        result = self.request({"action": "login", "username": username, "nonce": challenge["nonce"], "proof": proof},
+                              "Entrando", request_id)
+        if result is None:
+            return self.offline()
+        if result.get("type") == "login_ok":
+            return self.finish(f"BEM-VINDO, {result['player_tag']}!")
+        self.password.value = ""
+        self.focus = 1
+        self.message = (result.get("message", "Usuário ou senha incorretos."), RED)
+
+    def register(self) -> None:
+        username, tag = self.new_user.value, self.new_tag.value
+        password, confirm = self.new_password.value, self.new_confirm.value
+        if not re.fullmatch(r"[a-z0-9_]{3,20}", username):
+            self.message = ("Usuário: 3 a 20 caracteres (letras sem acento, números ou _).", RED)
+        elif not re.fullmatch(r"[A-Z0-9]{1,3}", tag):
+            self.message = ("Tag: 1 a 3 letras ou números.", RED)
+        elif len(password) < 8:
+            self.message = ("A senha precisa ter pelo menos 8 caracteres.", RED)
+        elif password != confirm:
+            self.message = ("As senhas não conferem.", RED)
+        else:
+            self.draw("Protegendo a senha")
+            salt = secrets.token_bytes(16)
+            digest = hashlib.scrypt(password.encode(), salt=salt, maxmem=SCRYPT_MAXMEM, **SCRYPT)
+            password_hash = f"scrypt${SCRYPT['n']}${SCRYPT['r']}${SCRYPT['p']}${salt.hex()}${digest.hex()}"
+            result = self.request({"action": "register", "username": username, "player_tag": tag,
+                                   "password_hash": password_hash}, "Criando a conta")
+            if result is None:
+                return self.offline()
+            if result.get("type") == "register_ok":
+                return self.finish(f"CONTA CRIADA! BEM-VINDO, {result['player_tag']}!")
+            self.message = (result.get("message", "Não foi possível criar a conta."), RED)
+
+    def guest(self) -> None:
+        SESSION.unlink(missing_ok=True)
+        enqueue("login", {"request_id": uuid.uuid4().hex, "action": "logout", "ts": int(time.time())})
+        self.finish("MODO CONVIDADO", color=TEXT)
+
+    def finish(self, text: str, color=GREEN) -> None:
+        self.surface.fill(BG)
+        self.text(self.title_font, text, color, self.w // 2, self.h // 2 - self.title_font.get_height() // 2)
+        pygame.display.flip()
+        end = time.monotonic() + 1.8
+        while time.monotonic() < end:
+            pygame.event.pump()
+            self.clock.tick(30)
+        self.done = True
+
+    def quit(self) -> None:
+        self.done = True
+
+    def run(self) -> None:
+        while not self.done:
+            for action, value in self.events():
+                self.handle(action, value)
+                if self.done:
+                    break
+            if not self.done:
+                self.draw()
+            self.clock.tick(30)
+
+
+if __name__ == "__main__":
+    LoginScreen().run()
+    pygame.quit()
