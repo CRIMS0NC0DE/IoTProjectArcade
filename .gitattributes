@@ -1,0 +1,2 @@
+# A extensão .pygame é exigida pelo Batocera; o conteúdo é Python.
+*.pygame linguist-language=Python

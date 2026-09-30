@@ -37,31 +37,66 @@ flowchart LR
    gravou. O serviço sincroniza essas cópias com a nuvem.
 6. O backend valida tudo com Pydantic, grava no PostgreSQL e empurra o ranking atualizado para os navegadores.
 
+## Tecnologias
+
+| Camada | Linguagem | Principais tecnologias | Pasta |
+|---|---|---|---|
+| Front-end (dashboard web) | HTML, JavaScript, CSS | Tailwind CSS (CDN), Fetch API, WebSocket | `backend/static/` |
+| Front-end (tela no fliperama) | Python | pygame | `edge/batocera/jogadores.pygame` |
+| Back-end | Python | FastAPI, Uvicorn, Pydantic, paho-mqtt | `backend/` |
+| Comunicação com o banco | Python + SQL | psycopg 3 com pool, SQL puro, migrações `.sql` | `backend/db.py`, `backend/migrations/` |
+| Banco de dados | SQL (PostgreSQL) | PostgreSQL no Supabase | — |
+| Raspberry Pi (borda/IoT) | Python, Shell, JSON | Batocera, RetroArch, paho-mqtt | `edge/batocera/` |
+| Mensageria | — | MQTT sobre TLS, QoS 1, HiveMQ Cloud | — |
+
 ## Estrutura
 
 ```
-arcade-cloud-score/
-├── .env.example            # modelo de configuração (o .env real não vai para o git)
-├── requirements.txt
-├── backend/
-│   ├── main.py             # MQTT (assinante), REST, WebSocket
-│   ├── auth.py             # contas: cadastro, login, sessão por cookie, perfil
-│   ├── db.py               # pool PostgreSQL, migrações e consultas
-│   ├── ra.py               # cliente da API web do RetroAchievements (com cache)
-│   ├── migrations/         # 001..005: esquema versionado, aplicado na subida
-│   └── static/             # dashboard: ranking (index), login, perfil
-└── edge/
-    ├── publisher.py        # publicador manual para testes (contrato arcade/scores/submit)
-    └── batocera/           # cliente do Pi
-        ├── install.sh      # instala/atualiza tudo no Pi via SSH
-        ├── arcaded.py      # serviço: MQTT, fila, leitura de score
-        ├── hook.py         # gancho de início/fim de jogo
-        ├── saves.py        # troca dos saves por jogador
-        ├── achievement.py  # gancho de conquista
-        ├── jogadores.pygame# tela "Login do Arcade" (entrar, criar conta, convidado)
-        ├── memory_maps.json# onde ler score/fase de cada jogo (por hash da ROM)
-        └── common.py, arcade-score.sh, arcade-achievement.sh, arcade_score
+.
+├── README.md
+├── requirements.txt         # dependências Python do back-end e do publisher
+├── .env.example             # modelo de configuração (o .env real não vai para o git)
+├── docs/                    # documentação técnica (ver índice abaixo)
+│
+├── backend/                 # SERVIDOR — Python (FastAPI)
+│   ├── main.py              # ponto de entrada: MQTT (assinante), REST, WebSocket
+│   ├── auth.py              # contas: cadastro, login, sessão por cookie, perfil
+│   ├── db.py                # comunicação com o PostgreSQL: pool, migrações e consultas
+│   ├── ra.py                # cliente da API web do RetroAchievements (com cache)
+│   ├── migrations/          # esquema do banco — SQL (001..005, aplicado na subida)
+│   └── static/              # FRONT-END — HTML, JavaScript, CSS
+│       ├── index.html       # ranking ao vivo
+│       ├── login.html       # entrar / criar conta
+│       ├── perfil.html      # perfil: estatísticas, conquistas, recordes, saves
+│       └── arcade.js, arcade.css
+│
+└── edge/                    # BORDA (IoT) — Python e Shell
+    ├── publisher.py         # publicador manual para testes (contrato arcade/scores/submit)
+    └── batocera/            # cliente instalado no Raspberry Pi
+        ├── install.sh       # instala/atualiza tudo no Pi via SSH
+        ├── arcaded.py       # serviço: MQTT, fila, leitura de score, saves
+        ├── hook.py          # gancho de início/fim de jogo
+        ├── saves.py         # troca dos saves por jogador
+        ├── achievement.py   # gancho de conquista
+        ├── common.py        # caminhos e utilidades compartilhados
+        ├── jogadores.pygame # tela "Login do Arcade" (entrar, criar conta, convidado)
+        ├── memory_maps.json # onde ler score/fase de cada jogo (por hash da ROM)
+        └── arcade_score, arcade-score.sh, arcade-achievement.sh   # serviço e ganchos (Shell)
 ```
+
+## Documentação
+
+A pasta [`docs/`](docs/README.md) detalha cada parte do projeto:
+
+| Documento | Conteúdo |
+|---|---|
+| [Estrutura de pastas](docs/estrutura-de-pastas.md) | O que é cada pasta e arquivo, e em que linguagem está escrito |
+| [Tecnologias](docs/tecnologias.md) | Linguagens, frameworks e protocolos de cada camada |
+| [Funcionalidades](docs/funcionalidades.md) | O que o sistema faz, com as regras e onde está implementado |
+| [Arquitetura](docs/arquitetura.md) | Componentes, fluxos passo a passo e modelo de concorrência |
+| [Contratos](docs/contratos.md) | Referência da API REST, do WebSocket e das mensagens MQTT |
+| [Banco de dados](docs/banco-de-dados.md) | Diagrama ER, tabelas, restrições e migrações |
+| [Raspberry Pi](docs/raspberry-pi.md) | O cliente do fliperama: instalação, arquivos no Pi e diagnóstico |
 
 ## Contratos MQTT
 
