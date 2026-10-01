@@ -491,3 +491,33 @@ def user_save_file(user_id: int, save_id: int) -> dict | None:
         return conn.execute(
             "SELECT filename, data FROM arcade.saves WHERE id = %s AND user_id = %s", (save_id, user_id)
         ).fetchone()
+
+
+# ---------- ESP32 (telemetria) ----------
+
+
+def record_telemetry(device_id: str, temperature: float, humidity: float | None) -> None:
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO arcade.telemetry (device_id, temperature, humidity) VALUES (%s, %s, %s)",
+            (_upsert_device(conn, device_id), temperature, humidity),
+        )
+
+
+def telemetry_history(device_id: str | None, hours: int) -> list[dict]:
+    """Leituras das últimas horas; sem device_id, as do aparelho que mandou a leitura mais recente."""
+    with pool.connection() as conn:
+        return conn.execute(
+            """
+            SELECT d.device_id, extract(epoch FROM t.measured_at)::bigint AS ts,
+                   t.temperature::float8 AS temperature, t.humidity::float8 AS humidity
+              FROM arcade.telemetry t
+              JOIN arcade.devices d ON d.id = t.device_id
+             WHERE t.measured_at > now() - make_interval(hours => %(hours)s)
+               AND t.device_id = CASE WHEN %(device)s::text IS NULL
+                                      THEN (SELECT device_id FROM arcade.telemetry ORDER BY measured_at DESC LIMIT 1)
+                                      ELSE (SELECT id FROM arcade.devices WHERE device_id = %(device)s) END
+             ORDER BY t.measured_at
+            """,
+            {"device": device_id, "hours": hours},
+        ).fetchall()

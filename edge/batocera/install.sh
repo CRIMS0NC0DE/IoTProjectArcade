@@ -17,7 +17,7 @@ ACH_HOOKS=/userdata/system/configs/emulationstation/scripts/achievements
 $PI "mkdir -p $APP/lib $APP/spool $APP/state /userdata/system/scripts /userdata/system/services /userdata/roms/pygame/jogadores $ACH_HOOKS"
 
 echo "==> Código e paho-mqtt (Python puro, o Batocera não tem pip)"
-tar -C "$HERE" -cf - common.py hook.py saves.py achievement.py arcaded.py memory_maps.json | $PI "tar -C $APP -xf -"
+tar -C "$HERE" -cf - common.py hook.py saves.py achievement.py arcaded.py esp32.py memory_maps.json | $PI "tar -C $APP -xf -"
 tar -C "$PAHO_DIR" --exclude=__pycache__ -cf - paho | $PI "rm -rf $APP/lib/paho && tar -C $APP/lib -xf -"
 $PI "cat > /userdata/system/scripts/arcade-score.sh" < "$HERE/arcade-score.sh"
 $PI "cat > $ACH_HOOKS/arcade-score.sh" < "$HERE/arcade-achievement.sh"

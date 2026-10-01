@@ -39,13 +39,15 @@ async function api(path, options = {}) {
   return data;
 }
 
-// Canto do cabeçalho: jogador logado (link para o perfil) ou botão de entrar.
+// Canto do cabeçalho: jogador logado (link para o perfil) ou botão de entrar. Devolve o jogador, ou null.
 async function renderNav(el) {
   const link = "text-yellow-400 hover:text-yellow-300";
   try {
     const me = await api("/api/me");
     el.innerHTML = `<a class="${link}" href="/perfil.html">▶ ${esc(me.player_tag)} · ${esc(me.username)}</a>`;
+    return me;
   } catch {
     el.innerHTML = `<a class="${link}" href="/login.html">ENTRAR</a>`;
+    return null;
   }
 }

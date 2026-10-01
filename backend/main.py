@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -15,7 +16,7 @@ from typing import Annotated, Literal
 
 import paho.mqtt.client as mqtt
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
@@ -37,9 +38,10 @@ MQTT_TOPIC = os.getenv("MQTT_TOPIC", "arcade/scores/submit")
 # Por aparelho: arcade/devices/<device_id>/{login,events} (Pi → backend) e .../commands (backend → Pi).
 SUBSCRIPTIONS = [
     MQTT_TOPIC, "arcade/devices/+/login", "arcade/devices/+/events", "arcade/devices/+/achievements",
-    "arcade/devices/+/saves",
+    "arcade/devices/+/saves", "arcade/devices/+/telemetry",
 ]
 MAX_SAVE_BYTES = 3 * 1024 * 1024  # o HiveMQ entrega mensagens de até ~4 MB, e o base64 aumenta 1/3
+TELEMETRY_SAVE_EVERY = 60  # s: o painel recebe toda leitura do ESP32 ao vivo, o banco guarda uma por minuto
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("backend")
@@ -48,6 +50,10 @@ Epoch = Annotated[int, Field(ge=0, lt=10**10)]  # epoch em segundos; barra times
 Md5 = Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 Username = Annotated[str, Field(pattern=r"^[a-z0-9_]{3,20}$")]
+DeviceId = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")]  # vira parte do tópico: nada de "/", "+" ou "#"
+Brightness = Annotated[int, Field(ge=0, le=255)]
+LedColor = Literal["green", "yellow", "red"]
+LedMode = Literal["joystick", "site"]  # joystick: os LEDs seguem o analógico; site: o dashboard liga e desliga
 
 # Chamadas à API do RetroAchievements podem levar segundos: rodam numa fila própria, fora da thread do MQTT.
 ra_tasks = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ra")
@@ -153,16 +159,52 @@ class SaveManifest(Message):
 
 SaveMessage = TypeAdapter(Annotated[SaveUpload | SaveManifest, Field(discriminator="type")])
 
-clients: set[WebSocket] = set()
+
+class Leds(Message):
+    green: Brightness
+    yellow: Brightness
+    red: Brightness
+
+
+class Telemetry(Message):
+    """Leitura do ESP32 ligado ao Pi por USB, repassada pelo arcaded.py."""
+
+    temperature: float | None = Field(ge=-40, le=125)  # °C; None: o DHT11 não respondeu
+    humidity: float | None = Field(ge=0, le=100)
+    x: int = Field(ge=-255, le=255)  # joystick: -255 = esquerda, 255 = direita
+    y: int = Field(ge=-255, le=255)  # -255 = cima, 255 = baixo
+    leds: Leds
+    mode: LedMode
+    playing: bool = False  # jogo aberto no Batocera: os LEDs piscam e o site espera o jogo acabar
+
+
+class LedCommand(BaseModel):
+    device_id: DeviceId
+    color: LedColor
+    on: bool
+
+
+class LedModeCommand(BaseModel):
+    device_id: DeviceId
+    mode: LedMode
+
+
+clients: set[WebSocket] = set()  # ranking ao vivo
+iot_clients: set[WebSocket] = set()  # painel do ESP32
+iot_state: dict[str, dict] = {}  # última leitura de cada aparelho, para quem abrir o painel depois
+iot_saved: dict[str, float] = {}  # quando cada aparelho teve a última leitura gravada no banco (monotonic)
+
+
+async def send_all(group: set[WebSocket], data) -> None:
+    for ws in list(group):
+        try:
+            await ws.send_json(data)
+        except Exception:
+            group.discard(ws)  # cliente caiu sem fechar o socket
 
 
 async def broadcast() -> None:
-    board = await asyncio.to_thread(db.leaderboard)  # consulta remota: fora do event loop
-    for ws in list(clients):
-        try:
-            await ws.send_json(board)
-        except Exception:
-            clients.discard(ws)  # cliente caiu sem fechar o socket
+    await send_all(clients, await asyncio.to_thread(db.leaderboard))  # consulta remota: fora do event loop
 
 
 def describe(exc: ValidationError) -> str:
@@ -274,6 +316,18 @@ def handle_save(client: mqtt.Client, device_id: str, payload: bytes) -> None:
     log.info("Saves sincronizados: %s | %d arquivo(s) enviados ao aparelho", where, sent)
 
 
+def handle_telemetry(device_id: str, payload: bytes, loop: asyncio.AbstractEventLoop) -> None:
+    t = Telemetry.model_validate_json(payload)
+    if device_id not in iot_state:
+        log.info("ESP32 de %s enviando telemetria", device_id)
+    state = iot_state[device_id] = {"device_id": device_id, "received_at": int(time.time()), **t.model_dump()}
+    asyncio.run_coroutine_threadsafe(send_all(iot_clients, state), loop)
+    now = time.monotonic()
+    if t.temperature is not None and (device_id not in iot_saved or now - iot_saved[device_id] >= TELEMETRY_SAVE_EVERY):
+        db.record_telemetry(device_id, t.temperature, t.humidity)
+        iot_saved[device_id] = now
+
+
 def build_mqtt_client(loop: asyncio.AbstractEventLoop) -> mqtt.Client:
     # client_id fixo + clean_session=False: o broker guarda as mensagens QoS 1 enquanto o backend estiver fora.
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="arcade-backend", clean_session=False)
@@ -309,6 +363,8 @@ def build_mqtt_client(loop: asyncio.AbstractEventLoop) -> mqtt.Client:
                     handle_achievement(device_id, msg.payload)
                 case ["arcade", "devices", device_id, "saves"]:
                     handle_save(client, device_id, msg.payload)
+                case ["arcade", "devices", device_id, "telemetry"]:
+                    handle_telemetry(device_id, msg.payload, loop)
         except ValidationError as exc:
             log.warning("Payload rejeitado em %s: %s", msg.topic, describe(exc))
         except Exception:
@@ -324,7 +380,7 @@ def build_mqtt_client(loop: asyncio.AbstractEventLoop) -> mqtt.Client:
 async def lifespan(app: FastAPI):
     db.connect(DATABASE_URL)  # falha já na subida se o banco estiver inacessível
     db.migrate()
-    client = build_mqtt_client(asyncio.get_running_loop())
+    client = app.state.mqtt = build_mqtt_client(asyncio.get_running_loop())
     client.connect_async(MQTT_HOST, MQTT_PORT)  # não bloqueia: o loop do paho conecta e reconecta sozinho
     client.loop_start()
     try:
@@ -357,6 +413,51 @@ async def websocket_endpoint(ws: WebSocket):
         pass
     finally:
         clients.discard(ws)
+
+
+# ---------- ESP32: temperatura, joystick e LEDs ----------
+
+
+@app.get("/api/iot/history")
+def get_iot_history(device_id: str | None = None, hours: int = Query(24, ge=1, le=168)):
+    return db.telemetry_history(device_id, hours)
+
+
+def send_device_command(device_id: str, cmd: dict) -> None:
+    if iot_state.get(device_id, {}).get("playing"):
+        raise HTTPException(409, "Jogo em andamento: os LEDs voltam a obedecer ao site quando ele terminar.")
+    client: mqtt.Client = app.state.mqtt
+    if not client.is_connected():
+        raise HTTPException(503, "Sem conexão com o MQTT agora. Tente de novo em instantes.")
+    # QoS 0: comando ao vivo; com o arcade desligado ele se perde em vez de ser aplicado horas depois.
+    client.publish(f"arcade/devices/{device_id}/commands", json.dumps(cmd), qos=0)
+
+
+@app.post("/api/iot/led", status_code=202)
+def set_led(body: LedCommand, user: Annotated[dict, Depends(auth.current_user)]):
+    send_device_command(body.device_id, {"type": "led", "color": body.color, "on": body.on})
+    log.info("LED %s %s em %s por %s", body.color, "ligado" if body.on else "desligado", body.device_id, user["username"])
+
+
+@app.post("/api/iot/mode", status_code=202)
+def set_led_mode(body: LedModeCommand, user: Annotated[dict, Depends(auth.current_user)]):
+    send_device_command(body.device_id, {"type": "led_mode", "mode": body.mode})
+    log.info("LEDs no modo %s em %s por %s", body.mode, body.device_id, user["username"])
+
+
+@app.websocket("/ws/iot")
+async def iot_websocket(ws: WebSocket):
+    await ws.accept()
+    iot_clients.add(ws)
+    try:
+        for state in list(iot_state.values()):
+            await ws.send_json({**state, "snapshot": True})  # leitura antiga: o painel não deve mostrar "ao vivo"
+        while True:
+            await ws.receive_text()  # só para perceber a desconexão
+    except WebSocketDisconnect:
+        pass
+    finally:
+        iot_clients.discard(ws)
 
 
 # Montado por último: em "/" ele engoliria qualquer rota registrada depois dele.

@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))  # paho-mqtt copiado pelo install.sh
 import paho.mqtt.client as mqtt  # noqa: E402
 
+import esp32  # noqa: E402
 from common import (  # noqa: E402
     AUTH_PENDING, AUTH_RESULT, BASE, CURRENT_PLAY, LIVE_SCORE, MEMORY_MAPS, SAVE_STORE, SAVES_SYNCED, SESSION, SPOOL,
     load_config,
@@ -48,10 +49,25 @@ def notify(text: str) -> None:
         pass
 
 
+def game_running() -> bool:
+    """Há uma partida em andamento? O gancho grava current_play.json (a tela de login não conta) e a API do
+    EmulationStation confirma, porque o arquivo pode ter sobrado de um desligamento no meio do jogo."""
+    if not CURRENT_PLAY.exists():
+        return False
+    try:
+        with urllib.request.urlopen("http://localhost:1234/runningGame", timeout=2) as reply:
+            return "path" in json.load(reply)  # sem jogo: {"msg": "NO GAME RUNNING"}
+    except (OSError, ValueError):
+        return True  # API fora do ar (ex.: ES ainda subindo): vale o arquivo do gancho
+
+
 def handle_command(client: mqtt.Client, cmd: dict) -> None:
     kind = cmd.get("type")
     if kind == "save_file":
         receive_save(cmd)
+        return
+    if kind in ("led", "led_mode"):
+        esp32.command(cmd)
         return
     # Respostas de login/cadastro: a tela de login espera por elas em auth_result.json.
     write_json(AUTH_RESULT, cmd)
@@ -260,10 +276,17 @@ def main() -> None:
     client.connect_async(config["MQTT_HOST"], int(config.get("MQTT_PORT", "8883")))
     client.loop_start()  # conecta e reconecta sozinho, inclusive se a rede ainda não subiu no boot
     threading.Thread(target=watch_scores, daemon=True).start()
+
+    def publish_telemetry(data: dict) -> None:
+        if connected.is_set():  # leitura ao vivo: sem conexão ela é descartada, não entra na fila
+            client.publish(f"{DEVICE_TOPIC}/telemetry", json.dumps(data), qos=0)
+
+    threading.Thread(target=esp32.run, args=(publish_telemetry,), daemon=True).start()
     log.info("Daemon iniciado como %s", DEVICE)
     tick = 0
     while True:
         try:
+            esp32.set_playing(game_running())  # LEDs piscam enquanto houver jogo aberto
             flush(client)
             if tick % 10 == 0:  # saves: a cada 10 s basta
                 upload_saves(client)
