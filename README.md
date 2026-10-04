@@ -39,7 +39,7 @@ flowchart LR
 6. O backend valida tudo com Pydantic, grava no PostgreSQL e empurra o ranking atualizado para os navegadores.
 7. Um **ESP32** ligado ao Pi por USB mede a temperatura (DHT11) e lê um joystick analógico; o serviço repassa as
    leituras pelo MQTT e o **Painel IoT** do dashboard as mostra ao vivo. Pelo painel, os LEDs do ESP32 são ligados e
-   desligados remotamente.
+   desligados remotamente. No Batocera, o joystick também funciona como as setas do teclado, inclusive na diagonal.
 
 ## Tecnologias
 
@@ -105,6 +105,9 @@ A pasta [`docs/`](docs/README.md) detalha cada parte do projeto:
 | [Contratos](docs/contratos.md) | Referência da API REST, do WebSocket e das mensagens MQTT |
 | [Banco de dados](docs/banco-de-dados.md) | Diagrama ER, tabelas, restrições e migrações |
 | [Raspberry Pi](docs/raspberry-pi.md) | O cliente do fliperama: instalação, arquivos no Pi e diagnóstico |
+
+Os prints de todas as telas (dashboard no computador e no celular, painel IoT e as telas da TV) ficam em
+[`prints/`](prints/).
 
 ## Contratos MQTT
 
@@ -340,7 +343,8 @@ Monitor Serial (115200) mostra `# Pronto!` e uma linha JSON a cada leitura. Depo
 
 **Como funciona:**
 
-- O ESP32 manda uma linha JSON quando o joystick mexe (até 10 por segundo) e a cada leitura do DHT11 (a cada 2 s).
+- O ESP32 manda uma linha JSON quando o joystick mexe (até 10 por segundo, ou na hora quando ele cruza o limite das
+  setas) e a cada leitura do DHT11 (a cada 2 s).
   O `esp32.py` procura a placa em `/dev/ttyUSB*` e `/dev/ttyACM*`, repassa cada leitura para
   `arcade/devices/<id>/telemetry` e volta a procurar se o cabo sair.
 - O backend empurra cada leitura para o **Painel IoT** (`/iot.html`) pelo WebSocket `/ws/iot` e grava a temperatura no
@@ -355,6 +359,11 @@ Monitor Serial (115200) mostra `# Pronto!` e uma linha JSON a cada leitura. Depo
   com `GAME on` / `GAME off`. Se o ESP32 reiniciar no meio do jogo, a leitura dele (`playing`) mostra o estado errado
   e o aviso é reenviado. A animação tem prioridade: durante o jogo, o site não comanda os LEDs (o backend responde
   409), e no fim deles voltam ao modo anterior.
+- **Joystick no Batocera:** o `esp32.py` cria um teclado virtual (uinput) e o joystick aperta as setas: acima de 110
+  (na escala -255..255) a seta aperta, abaixo de 80 ela solta, para não ficar piscando com a alavanca parada perto do
+  limite. Na diagonal, duas setas ficam apertadas juntas. Como o sistema o vê como um teclado, ele anda nos menus do
+  EmulationStation, na tela de login e nos jogos sem configurar nada (o RetroArch usa as setas como direcional do
+  jogador 1). Se o cabo sair com a alavanca inclinada, as setas são soltas.
 
 ## Decisões técnicas
 
@@ -373,6 +382,11 @@ Monitor Serial (115200) mostra `# Pronto!` e uma linha JSON a cada leitura. Depo
 - **Contas**: senha com scrypt (parâmetros da OWASP), login com tempo constante (não revela se o usuário existe),
   sessão em cookie `HttpOnly` + `SameSite=Lax`, só o hash do token no banco.
 - **RetroAchievements**: chamadas à API numa fila própria, fora da thread do MQTT, e com cache no banco, como a API pede.
+- **Relógio do Pi**: o Raspberry Pi não tem relógio com bateria, e o Batocera só salva a hora (`fake-hwclock`) ao
+  desligar pelo menu; desligando na tomada, todo boot começava numa data antiga até o `ntpd` acertar pela internet.
+  O `arcaded.py` salva a hora a cada 10 minutos, segura partidas e conquistas na fila até a hora ser confiável e, ao
+  enviar, corrige os horários pelo relógio monotônico (que não pula). O `hook.py` refaz o início da partida no
+  `gameStop`, e o "stop" atualiza o início no banco: um jogo que atravessa o acerto não dura semanas.
 
 ## Limitações conhecidas
 
@@ -395,7 +409,8 @@ Monitor Serial (115200) mostra `# Pronto!` e uma linha JSON a cada leitura. Depo
   não seguem o padrão `<ROM>.*` e não são trocados por jogador.
 - **Confiança no aparelho**: depois do login, é o Pi que informa quem está jogando em cada partida; um Pi
   adulterado poderia atribuir partidas a outra conta.
-- **ESP32**: um por Pi (o painel mostra um aparelho por vez). As leituras de quando o arcade está sem internet não
-  são guardadas, e o histórico tem uma leitura por minuto. O DHT11 tem precisão de ±2 °C.
+- **ESP32**: um por Pi (o painel mostra um aparelho por vez). No Batocera, o joystick é só direcional (setas), sem
+  botões. As leituras de quando o arcade está sem internet não são guardadas, e o histórico tem uma leitura por
+  minuto. O DHT11 tem precisão de ±2 °C.
 - **Login offline**: sem conexão com o servidor não dá para entrar (a senha é conferida lá); dá para jogar como
   convidado.

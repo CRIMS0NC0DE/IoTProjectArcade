@@ -46,6 +46,8 @@ Aparece no menu do Batocera, no sistema PYGAME. Implementada em `edge/batocera/j
 - **Teclado:** digitação direta; setas ou Tab trocam de campo; Enter confirma; Esc volta.
 - **Controle:** direcional escolhe; A abre um teclado virtual na tela; B volta ou apaga; START envia.
 - Aceita controles reconhecidos pelo SDL2 e joysticks genéricos.
+- **Joystick do ESP32:** funciona como as setas do teclado, aqui, nos menus do Batocera e nos jogos (diagonal = duas
+  setas juntas).
 - Mostra quem está jogando agora ("Jogando agora: THI" ou "convidado").
 - Se o servidor não responder em 10 segundos, avisa e sugere jogar como convidado.
 - Ao entrar, o menu do Batocera mostra um balão "Bem-vindo, &lt;TAG&gt;!".
@@ -150,6 +152,7 @@ jogador o seu. Implementado em `edge/batocera/saves.py`, `arcaded.py` e `backend
 | Erro num gancho do Pi | É anotado em um arquivo de log e o jogo abre normalmente. |
 | Queda de energia no meio da partida | O progresso salvo é guardado na próxima troca de saves. |
 | Sem servidor na hora do login | Não dá para entrar (a senha é conferida no servidor), mas dá para jogar como convidado. |
+| Arcade ligado com a hora atrasada | O Pi não tem relógio com bateria: até a internet acertar a hora, partidas e conquistas esperam na fila e saem com o horário corrigido. |
 
 ## 10. Ferramentas de apoio
 

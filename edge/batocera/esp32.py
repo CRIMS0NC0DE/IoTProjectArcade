@@ -1,5 +1,6 @@
 """Ponte com o ESP32 ligado por USB (joystick, LEDs e DHT11): a telemetria vai para o MQTT, os comandos do site
-vão para os LEDs e, enquanto houver jogo aberto no Batocera, os LEDs piscam.
+vão para os LEDs e, enquanto houver jogo aberto no Batocera, os LEDs piscam. O joystick também vira as setas de
+um teclado virtual, então ele anda nos menus do Batocera e joga, inclusive na diagonal (duas setas juntas).
 
 O ESP32 manda uma linha JSON por leitura; linhas que não começam com "{" são texto para o Monitor Serial.
 """
@@ -12,15 +13,25 @@ import termios
 import threading
 import time
 
+try:
+    from evdev import UInput, ecodes  # vem no Batocera
+except ImportError:
+    UInput = ecodes = None
+
 PORTS = ("/dev/ttyUSB*", "/dev/ttyACM*")  # conversores CP2102/CH340 viram ttyUSB; placas com USB nativo, ttyACM
 SILENCE = 10  # s sem telemetria válida: porta errada ou ESP32 travado; fecha e procura de novo
 COLORS = ("green", "yellow", "red")
 MODES = ("joystick", "site")
+# Escala -255..255 do firmware. Histerese: a seta aperta acima de PRESS e só solta abaixo de RELEASE, para não
+# ficar piscando com a alavanca parada perto do limite. Iguais às faixas do arcade_esp32.cpp.
+PRESS, RELEASE = 110, 80
 
 log = logging.getLogger("arcaded")
 _lock = threading.Lock()  # protege _fd: a thread do MQTT escreve comandos enquanto a da ponte lê
 _fd: int | None = None
 _playing = False  # há jogo aberto no Batocera: o ESP32 anima os LEDs enquanto for True
+_keyboard = None  # teclado virtual (uinput), criado quando o ESP32 aparece; False se o uinput falhou
+_held: set[int] = set()  # setas apertadas agora
 
 
 def _open(path: str) -> int:
@@ -44,6 +55,39 @@ def _telemetry(line: bytes) -> dict | None:
     except ValueError:
         return None  # linha cortada (ex.: o ESP32 reiniciou no meio dela)
     return data if isinstance(data, dict) else None
+
+
+def _arrows(x: int, y: int) -> None:
+    """Aperta e solta as setas do teclado virtual conforme o joystick (y negativo é para cima)."""
+    global _keyboard, _held
+    if UInput is None or _keyboard is False:
+        return
+    if _keyboard is None:
+        try:
+            # As teclas comuns além das setas: assim o udev o marca como teclado e o EmulationStation, o RetroArch e
+            # a tela de login o aceitam sem configurar nada. Sem BTN_* (não vira controle de jogo) e sem as teclas
+            # especiais (energia, Wi-Fi...), que o sistema trataria.
+            arrows = (ecodes.KEY_UP, ecodes.KEY_LEFT, ecodes.KEY_RIGHT, ecodes.KEY_DOWN)
+            keys = [*range(ecodes.KEY_ESC, ecodes.KEY_KPDOT + 1), *arrows]
+            _keyboard = UInput({ecodes.EV_KEY: keys}, name="ESP32 Joystick (arcade)")
+            log.info("Joystick do ESP32 ligado às setas do teclado")
+        except OSError as exc:
+            log.warning("Sem teclado virtual para o joystick (%s); ele fica só no painel", exc)
+            _keyboard = False  # não tenta de novo a cada leitura
+            return
+    want = set()
+    for value, minus, plus in ((x, ecodes.KEY_LEFT, ecodes.KEY_RIGHT), (y, ecodes.KEY_UP, ecodes.KEY_DOWN)):
+        for key, amount in ((minus, -value), (plus, value)):
+            if amount >= (RELEASE if key in _held else PRESS):
+                want.add(key)
+    if want == _held:
+        return
+    for key in _held - want:
+        _keyboard.write(ecodes.EV_KEY, key, 0)
+    for key in want - _held:
+        _keyboard.write(ecodes.EV_KEY, key, 1)
+    _keyboard.syn()
+    _held = want
 
 
 def _serve(path: str, publish) -> None:
@@ -71,8 +115,11 @@ def _serve(path: str, publish) -> None:
                 playing = data.get("playing")
                 if isinstance(playing, bool) and playing != _playing:  # ex.: o ESP32 reiniciou no meio do jogo
                     _send(f"GAME {'on' if _playing else 'off'}")
+                if isinstance(data.get("x"), int) and isinstance(data.get("y"), int):
+                    _arrows(data["x"], data["y"])
                 publish(data)
     finally:
+        _arrows(0, 0)  # cabo saiu com a alavanca inclinada: nenhuma seta fica presa
         with _lock:
             _fd = None
         os.close(fd)

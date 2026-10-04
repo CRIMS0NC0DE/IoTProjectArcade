@@ -110,7 +110,9 @@ def record_play(device_id: str, e: dict) -> bool:
             INSERT INTO arcade.plays AS p (uuid, user_id, device_id, game_id, started_at, ended_at)
             VALUES (%(play_uuid)s, (SELECT id FROM arcade.users WHERE username = %(username)s),
                     %(device_pk)s, %(game_pk)s, to_timestamp(%(started_at)s), to_timestamp(%(ended_at)s))
-            ON CONFLICT (uuid) DO UPDATE SET ended_at = coalesce(EXCLUDED.ended_at, p.ended_at)
+            ON CONFLICT (uuid) DO UPDATE SET ended_at = coalesce(EXCLUDED.ended_at, p.ended_at),
+                -- o "stop" manda: se o relógio do Pi foi acertado no meio da partida, ele traz o início refeito
+                started_at = CASE WHEN EXCLUDED.ended_at IS NULL THEN p.started_at ELSE EXCLUDED.started_at END
             RETURNING id
             """,
             {

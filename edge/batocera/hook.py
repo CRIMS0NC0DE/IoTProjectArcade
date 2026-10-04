@@ -16,7 +16,7 @@ import zipfile
 from pathlib import Path
 
 import saves
-from common import BASE, CURRENT_PLAY, LIVE_SCORE, SESSION, enqueue, read_json, write_json
+from common import BASE, CURRENT_PLAY, LIVE_SCORE, SESSION, boot_id, clock_stamp, enqueue, read_json, write_json
 
 ROMS = Path("/userdata/roms")
 IGNORED = {ROMS / "pygame/jogadores/jogadores.pygame"}  # a própria tela de login não conta como partida
@@ -79,7 +79,7 @@ def main(event: str, system: str, emulator: str, core: str, rom_path: str, *_) -
             "username": (read_json(SESSION) or {}).get("username"),  # None = convidado
             "started_at": now,
         }
-        write_json(CURRENT_PLAY, play)
+        write_json(CURRENT_PLAY, {**play, "clock": clock_stamp()})
         enqueue("events", {**play, "event": "start"})
         guarded(saves.restore, play["username"], system, rom)  # põe no lugar os saves de quem vai jogar
     elif event == "gameStop":
@@ -87,6 +87,11 @@ def main(event: str, system: str, emulator: str, core: str, rom_path: str, *_) -
         if not play or play["rom"] != rom.name:
             return  # sem início registrado para esta ROM
         CURRENT_PLAY.unlink(missing_ok=True)
+        clock = play.pop("clock", None)
+        if clock and clock["boot"] == boot_id():
+            # Se o ntpd acertou o relógio no meio da partida, o started_at gravado está na hora antiga:
+            # refaz pelo monotônico, que não pula. Sem isso, um jogo aberto logo depois do boot durava semanas.
+            play["started_at"] = now - round(time.monotonic() - clock["mono"])
         stop = {**play, "event": "stop", "ended_at": max(now, play["started_at"])}
         live = read_json(LIVE_SCORE) or {}
         if live.get("play_uuid") == play["play_uuid"]:  # última leitura de memória feita pelo daemon

@@ -40,6 +40,14 @@ int   site[3];                        // o que o site pediu para cada LED (vale 
 bool  modoSite = false;               // false: LEDs seguem o joystick; true: o site liga e desliga
 bool  jogando = false;                // o Pi avisou que há um jogo aberto: a animação tem prioridade
 
+// Faixa da inclinação num eixo: 0 parado, ±1 entre 80 e 110, ±2 acima de 110. No Pi o joystick também vira as
+// setas do teclado (aperta acima de 110, solta abaixo de 80, ver esp32.py): mudar de faixa é enviado na hora,
+// sem esperar o INTERVALO_ENVIO, para a seta não atrasar nos jogos.
+int faixa(int v) {
+  int f = abs(v) >= 110 ? 2 : abs(v) >= 80 ? 1 : 0;
+  return v < 0 ? -f : f;
+}
+
 // Média de 64 leituras com o joystick parado
 int calibrar(uint8_t pin) {
   long soma = 0;
@@ -183,12 +191,13 @@ void loop() {
     leuDht = true;
   }
 
-  // Envia quando o joystick mexe (no máximo a cada INTERVALO_ENVIO), logo após um comando
-  // e a cada leitura do DHT — que também serve de sinal de vida para o painel
+  // Envia quando o joystick mexe (no máximo a cada INTERVALO_ENVIO, ou na hora se mudou de faixa), logo após
+  // um comando e a cada leitura do DHT — que também serve de sinal de vida para o painel
   static uint32_t ultimoEnvio = 0;
   static int ax = 999, ay = 999;
   bool mexeu = x != ax || y != ay;
-  if (comando || leuDht || (mexeu && millis() - ultimoEnvio >= INTERVALO_ENVIO)) {
+  bool virou = faixa(x) != faixa(ax) || faixa(y) != faixa(ay);
+  if (comando || leuDht || virou || (mexeu && millis() - ultimoEnvio >= INTERVALO_ENVIO)) {
     ultimoEnvio = millis(); ax = x; ay = y;
     enviar(x, y);
   }

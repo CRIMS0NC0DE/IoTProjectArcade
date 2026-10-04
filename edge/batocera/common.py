@@ -49,6 +49,18 @@ def write_json(path: Path, data) -> None:
     os.replace(tmp, path)
 
 
+def boot_id() -> str:
+    return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+
+
+def clock_stamp() -> dict:
+    """Relógio comum + monotônico do mesmo instante. O Pi não tem relógio com bateria: cada boot começa na hora
+    salva pelo fake-hwclock e só acerta quando o ntpd alcança a internet. O monotônico não pula, então dá para
+    refazer a hora certa depois (ver arcaded.fix_times), desde que seja no mesmo boot."""
+    return {"boot": boot_id(), "mono": time.monotonic(), "wall": time.time()}
+
+
 def enqueue(kind: str, payload: dict) -> None:
     """Põe uma mensagem na fila para arcade/devices/<id>/<kind>; o daemon envia quando houver conexão."""
-    write_json(SPOOL / f"{time.time_ns()}-{kind}.json", payload)  # o nome mantém a ordem cronológica
+    # O nome mantém a ordem cronológica; "_clock" fica só no Pi (o daemon tira antes de enviar).
+    write_json(SPOOL / f"{time.time_ns()}-{kind}.json", {**payload, "_clock": clock_stamp()})

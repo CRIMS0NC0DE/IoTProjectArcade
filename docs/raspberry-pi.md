@@ -81,6 +81,7 @@ Tudo dentro de `/userdata/system/arcade/`:
 | `state/live_score.json` | Melhor score e fase da partida atual | `arcaded.py` |
 | `state/save_owners.json` | De quem são os saves que estão no emulador agora | `saves.py` |
 | `state/saves_synced.json` | O que já foi enviado para a nuvem | `arcaded.py` |
+| `state/clock_ok` | `boot_id` do boot em que a hora já foi acertada (vale se o serviço reiniciar) | `arcaded.py` |
 | `saves/<usuário>/<sistema>/` | Cópia dos saves de cada jogador | `saves.py`, `arcaded.py` |
 | `saves/@convidado/` | Saves de quem joga sem login. Não vão para a nuvem | `saves.py` |
 | `saves/@backup-inicial/` | Saves que existiam antes de o recurso ser instalado | `saves.py` |
@@ -96,11 +97,16 @@ Cada arquivo se chama `<horário em nanossegundos>-<tipo>.json`, por exemplo `17
 tipo (`login`, `events`, `achievements`) define o tópico MQTT de destino, e o horário no nome mantém a ordem de
 envio. O serviço publica um arquivo por vez e só o apaga depois da confirmação do broker.
 
+Cada arquivo também guarda um campo `_clock` (identificador do boot, relógio comum e relógio monotônico do momento
+em que entrou na fila). Ele não sai do Pi: o serviço o tira antes de publicar e, se a hora foi acertada depois que a
+mensagem entrou na fila, desloca `started_at`, `ended_at`, `unlocked_at` e `ts` junto com o acerto. Partidas e
+conquistas esperam a hora ficar confiável; login e logout saem na hora.
+
 ## Os quatro programas
 
 ### `arcaded.py` — o serviço
 
-Inicia no boot pelo script `arcade_score` e nunca termina. Faz quatro coisas:
+Inicia no boot pelo script `arcade_score` e nunca termina. Tarefas:
 
 | Tarefa | Frequência |
 |---|---|
@@ -108,6 +114,12 @@ Inicia no boot pelo script `arcade_score` e nunca termina. Faz quatro coisas:
 | Enviar saves de jogadores que mudaram | A cada 10 segundos |
 | Ler score e fase do jogo em execução | A cada 1 segundo |
 | Aplicar respostas do servidor (login, cadastro, saves recebidos) | Quando chegam |
+| Ponte com o ESP32: telemetria, LEDs e setas do teclado virtual | A cada leitura do ESP32 |
+| Salvar a hora no `fake-hwclock` (depois que ela é confiável) | A cada 10 minutos |
+
+**Relógio:** o Pi não tem relógio com bateria. Cada boot começa na hora salva pelo `fake-hwclock`, e o `ntpd` só
+acerta quando a rede sobe. O serviço considera a hora confiável quando vê o `ntpd` acertá-la, quando ela já não é a
+carregada no boot ou, sem acerto, depois de 10 minutos conectado. O log mostra `Relógio: ... (motivo)`.
 
 Conecta e reconecta sozinho, com espera crescente de 1 a 60 segundos, inclusive se a rede ainda não tiver subido
 no boot.
@@ -120,7 +132,8 @@ para o `hook.py`.
 - **`gameStart`:** cria o `play_uuid`, descobre o título, calcula o hash da ROM, lê quem está logado, grava
   `current_play.json`, põe o evento na fila e troca os saves para os do jogador.
 - **`gameStop`:** recupera a partida de `current_play.json`, acrescenta o melhor score de `live_score.json`, põe
-  o evento na fila e guarda os saves na cópia do jogador.
+  o evento na fila e guarda os saves na cópia do jogador. Se a hora foi acertada no meio da partida, refaz o início
+  pelo relógio monotônico guardado no `gameStart`.
 
 O Batocera espera o gancho terminar antes de abrir o jogo. Por isso ele só lê e grava arquivos locais, e qualquer
 erro é anotado em `hook.log` sem impedir o jogo de abrir.

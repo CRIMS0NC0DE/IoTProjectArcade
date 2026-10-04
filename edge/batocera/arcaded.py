@@ -1,12 +1,14 @@
 """Daemon do arcade (serviço arcade_score): mantém a conexão MQTT, esvazia a fila local e aplica as respostas do servidor."""
 
 import base64
+import calendar
 import hashlib
 import json
 import logging
 import os
 import re
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -20,7 +22,8 @@ import paho.mqtt.client as mqtt  # noqa: E402
 import esp32  # noqa: E402
 from common import (  # noqa: E402
     AUTH_PENDING, AUTH_RESULT, BASE, CURRENT_PLAY, LIVE_SCORE, MEMORY_MAPS, SAVE_STORE, SAVES_SYNCED, SESSION, SPOOL,
-    load_config,
+    STATE,
+    boot_id, load_config,
     read_json, write_json,
 )
 
@@ -113,13 +116,91 @@ def on_message(client, userdata, msg):
         log.exception("Erro ao processar %s", msg.topic)
 
 
+# ---------- relógio ----------
+# O Pi não tem relógio com bateria: cada boot começa na hora que o fake-hwclock salvou (o Batocera só salva ao
+# desligar pelo menu, então ficava sempre em 09/09) e o ntpd só acerta quando a rede sobe, minutos depois.
+# Tudo o que acontece antes disso sai com a data errada, e uma partida que atravessa o acerto durava semanas.
+
+FAKE_HWCLOCK = Path("/userdata/system/fake-hwclock.data")
+CLOCK_OK = STATE / "clock_ok"  # boot_id do boot em que o relógio já foi acertado (sobrevive a reiniciar o daemon)
+TIMED_KINDS = ("events", "achievements")  # esperam o relógio acertar; login e saves não podem esperar
+TIME_FIELDS = ("started_at", "ended_at", "unlocked_at", "ts")
+BOOT = boot_id()
+clock_ok = threading.Event()
+
+
+def wall_offset() -> float:
+    return time.time() - time.monotonic()
+
+
+def fix_times(payload: dict) -> dict:
+    """Tira o "_clock" da mensagem e, se o relógio foi acertado depois que ela entrou na fila (no mesmo boot),
+    leva os horários junto com o acerto."""
+    stamp = payload.pop("_clock", None)
+    if stamp and stamp.get("boot") == BOOT:
+        shift = round(wall_offset() - (stamp["wall"] - stamp["mono"]))
+        if abs(shift) >= 2:
+            for field in TIME_FIELDS:
+                if isinstance(payload.get(field), int):
+                    payload[field] += shift
+    return payload
+
+
+def wait_clock() -> str:
+    """Espera a hora do Pi ficar confiável e diz por quê."""
+    start = wall_offset()
+    if CLOCK_OK.exists() and CLOCK_OK.read_text() == BOOT:
+        return "já acertado neste boot"
+    try:
+        saved = calendar.timegm(time.strptime(FAKE_HWCLOCK.read_text().strip(), "%Y-%m-%d %H:%M:%S"))  # em UTC
+        if time.time() - time.clock_gettime(time.CLOCK_BOOTTIME) - saved > 120:
+            return "acertado antes de o daemon subir"  # a hora já não é a que o fake-hwclock carregou no boot
+    except (OSError, ValueError):
+        pass
+    online_since = None
+    while True:
+        time.sleep(1)
+        if abs(wall_offset() - start) >= 2:
+            return "acertado pela internet"
+        if not connected.is_set():
+            online_since = None
+        elif online_since is None:
+            online_since = time.monotonic()
+        elif time.monotonic() - online_since > 600:
+            return "sem acerto depois de 10 min online; seguindo com a hora atual"
+
+
+def watch_clock() -> None:
+    """Libera o envio de partidas e conquistas quando a hora fica confiável e, daí em diante, salva a hora no
+    fake-hwclock a cada 10 minutos, para o próximo boot começar perto da hora certa (os saves usam a data do
+    arquivo para decidir qual versão é a mais nova)."""
+    try:
+        reason = wait_clock()
+        CLOCK_OK.write_text(BOOT)
+    except Exception:
+        log.exception("Erro ao conferir o relógio")
+        reason = "erro ao conferir; seguindo com a hora atual"
+    clock_ok.set()  # nunca segurar a fila para sempre
+    log.info("Relógio: %s (%s)", time.strftime("%d/%m/%Y %H:%M:%S"), reason)
+    while True:
+        try:
+            subprocess.run(["fake-hwclock", "save"], capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning("fake-hwclock save falhou: %s", exc)
+        time.sleep(600)
+
+
 def flush(client: mqtt.Client) -> None:
     """Envia a fila em ordem; um arquivo só sai da fila depois do PUBACK do broker."""
     for path in sorted(SPOOL.glob("*.json")):
         if not connected.is_set():
             return
         kind = path.stem.split("-", 1)[1]  # 1727612800123-events.json -> events
-        info = client.publish(f"{DEVICE_TOPIC}/{kind}", path.read_bytes(), qos=1)
+        if kind in TIMED_KINDS and not clock_ok.is_set():
+            continue  # partidas e conquistas esperam a hora certa; entre elas a ordem se mantém
+        payload = read_json(path)
+        data = json.dumps(fix_times(payload)).encode() if isinstance(payload, dict) else path.read_bytes()
+        info = client.publish(f"{DEVICE_TOPIC}/{kind}", data, qos=1)
         info.wait_for_publish(timeout=10)
         if not info.is_published():
             return  # tenta de novo no próximo ciclo
@@ -276,6 +357,7 @@ def main() -> None:
     client.connect_async(config["MQTT_HOST"], int(config.get("MQTT_PORT", "8883")))
     client.loop_start()  # conecta e reconecta sozinho, inclusive se a rede ainda não subiu no boot
     threading.Thread(target=watch_scores, daemon=True).start()
+    threading.Thread(target=watch_clock, daemon=True).start()
 
     def publish_telemetry(data: dict) -> None:
         if connected.is_set():  # leitura ao vivo: sem conexão ela é descartada, não entra na fila
